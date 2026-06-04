@@ -1,9 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 // ArkhamWebhook Arkham 平台 Webhook 推送的完整结构体
@@ -76,14 +83,16 @@ func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
 
 	var webhook ArkhamWebhook
 
-	if err := json.NewDecoder(r.Body).Decode(&webhook); err != nil {
+	// 限制请求体大小为 1MB
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	if err := decoder.Decode(&webhook); err != nil {
 		http.Error(w, "JSON 解析失败: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// 控制台打印关键信息（方便调试）
 	fmt.Printf("\n=== Arkham Webhook 收到新数据 ===\n")
-	fmt.Printf("警报名称: %s\n", webhook.AlertName)
+	fmt.Printf("警报名称:	%s\n", webhook.AlertName)
 	fmt.Printf("交易哈希: %s\n", webhook.Transfer.TransactionHash)
 	fmt.Printf("From: %s (%s)\n", webhook.Transfer.FromAddress.Address, webhook.Transfer.FromAddress.ArkhamEntity.Name)
 	fmt.Printf("To:   %s (%s)\n", webhook.Transfer.ToAddress.Address, webhook.Transfer.ToAddress.ArkhamEntity.Name)
@@ -92,18 +101,160 @@ func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
 		webhook.Transfer.UnitValue, webhook.Transfer.HistoricalUSD)
 	fmt.Printf("链: %s | 区块: %d\n", webhook.Transfer.Chain, webhook.Transfer.BlockNumber)
 
+	fmt.Println("✅ 准备推送钉钉...")
+	// 发送到钉钉
+	sendToDingTalk(webhook)
+
+	fmt.Println("✅ 钉钉推送完成")
+
 	// 返回完整结构体
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(webhook)
+	_ = json.NewEncoder(w).Encode(webhook)
+}
+
+// ==================== 发送钉钉消息 ====================
+
+func sendToDingTalk(webhook ArkhamWebhook) {
+	dingURL := os.Getenv("DINGTALK_WEBHOOK")
+	dingURL = "https://oapi.dingtalk.com/robot/send?access_token=e9bc0cc7028066e180fd4b80886af0db605d33d707e2bc17012f2eb4cdd61912"
+	if dingURL == "" {
+		fmt.Println("警告：未设置 DINGTALK_WEBHOOK 环境变量，跳过钉钉推送")
+		return
+	}
+
+	// **🔗 交易详情**
+	// - 交易哈希：%s
+	// - 区块高度：%d
+
+	// 构造钉钉 Markdown 消息
+	text := fmt.Sprintf(`### 🚨🚨🚨MUD跨链信息🚨🚨🚨  
+
+---
+
+**📋 基本信息**
+- 警报名称：%s
+- 链：%s
+- 时间：%s
+
+**💸 资产转移**
+- From：%s 
+- To：%s 
+
+**💰 Token 信息**
+- Token：%s (%s)
+- 数量：%.6f %s
+- USD 价值：$%.2f
+`,
+		webhook.AlertName,
+		webhook.Transfer.Chain,
+		getTime(webhook.Transfer.BlockTimestamp),
+		// webhook.Transfer.TransactionHash,
+		// webhook.Transfer.BlockNumber,
+		webhook.Transfer.FromAddress.Address,
+		// webhook.Transfer.FromAddress.ArkhamEntity.Name,
+		webhook.Transfer.ToAddress.Address,
+		// webhook.Transfer.ToAddress.ArkhamEntity.Name,
+		webhook.Transfer.TokenSymbol,
+		webhook.Transfer.TokenName,
+		webhook.Transfer.UnitValue,
+		webhook.Transfer.TokenSymbol,
+		webhook.Transfer.HistoricalUSD,
+	)
+
+	message := map[string]interface{}{
+		"msgtype": "markdown",
+		"markdown": map[string]string{
+			"title": "Arkham 交易警报",
+			"text":  text,
+		},
+	}
+
+	body, err := json.Marshal(message)
+	if err != nil {
+		fmt.Println("JSON 序列化失败:", err)
+		return
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Post(dingURL, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		fmt.Println("钉钉推送失败:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("钉钉推送返回非 200: %d, 响应: %s\n", resp.StatusCode, string(respBody))
+		return
+	}
+
+	fmt.Println("✅ 已成功推送到钉钉")
+}
+
+// 改为 本地时间区
+func getTime(strings string) string {
+
+	// 原始 RFC3339 时间字符串
+	// rfcTime := string
+	fmt.Println(strings, "11111111111")
+
+	// 解析成 time.Time 对象
+	parsedTime, err := time.Parse(time.RFC3339, strings)
+	if err != nil {
+		panic(err)
+	}
+
+	// 格式化成常见的中文习惯格式（例如：2023-08-23 22:26:35）
+	normalTime := parsedTime.Format("2006-01-02 15:04:05")
+	fmt.Println(normalTime)
+
+	// 也可以带时区显示（本地时区）
+	localTime := parsedTime.Local().Format("2006-01-02 15:04:05")
+	fmt.Println(localTime)
+
+	return localTime
 }
 
 func main() {
-	http.HandleFunc("/webhook", arkhamWebhookHandler)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webhook", arkhamWebhookHandler)
 
-	fmt.Println("Arkham Webhook 服务启动成功 → http://localhost:8080/webhook")
-	fmt.Println("请使用 ngrok 暴露此端口后填入 Arkham")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		panic(err)
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	// 优雅关闭通道
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		fmt.Println("Arkham Webhook 服务启动成功 → http://localhost:8080/webhook")
+		fmt.Println("请使用 ngrok 暴露此端口后填入 Arkham")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("服务器启动失败: %v\n", err)
+			os.Exit(1)
+		}
+	}()
+
+	// 等待中断信号
+	<-stop
+	fmt.Println("\n正在关闭服务器...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		fmt.Printf("服务器关闭超时: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("服务器已优雅关闭")
 }

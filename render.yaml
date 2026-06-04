@@ -7,3 +7,5 @@ services:
     envVars:
       - key: PORT
         value: "8080"   # Render 会自动注入端口
+      - key: DINGTALK_WEBHOOK
+        value: "https://oapi.dingtalk.com/robot/send?access_token=e9bc0cc7028066e180fd4b80886af0db605d33d707e2bc17012f2eb4cdd61912" 
