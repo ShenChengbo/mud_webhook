@@ -101,7 +101,8 @@ func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
 		webhook.Transfer.UnitValue, webhook.Transfer.HistoricalUSD)
 	fmt.Printf("链: %s | 区块: %d\n", webhook.Transfer.Chain, webhook.Transfer.BlockNumber)
 
-	fmt.Println("✅ 准备推送钉钉...")
+	fmt.Printf("交易时间: %s\n", getTime(webhook.Transfer.BlockTimestamp))
+	fmt.Println("✅ 准备推送钉钉测试啊...")
 	// 发送到钉钉
 	sendToDingTalk(webhook)
 
