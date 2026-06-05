@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -73,6 +74,30 @@ type ArkhamLabel struct {
 	ChainType string `json:"chainType"` // 链类型（evm 等）
 }
 
+// 全局去重缓存（简单版，生产建议换 Redis）
+var processed = struct {
+	sync.RWMutex
+
+	m map[string]time.Time
+}{m: make(map[string]time.Time)}
+
+func isProcessed(id string) bool {
+	processed.RLock()
+	t, exists := processed.m[id]
+	processed.RUnlock()
+
+	if exists && time.Since(t) < 30*time.Minute { // 30分钟内视为重复
+		return true
+	}
+	return false
+}
+
+func markProcessed(id string) {
+	processed.Lock()
+	processed.m[id] = time.Now()
+	processed.Unlock()
+}
+
 // ==================== Webhook 接口 ====================
 
 func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +115,18 @@ func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ==================== 去重核心逻辑 ====================
+	key := fmt.Sprintf("%d-%s", webhook.ID, webhook.Transfer.TransactionHash)
+	if isProcessed(key) {
+		fmt.Printf("⚠️ 重复请求，已忽略: %s\n", key)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	markProcessed(key)
+	// ====================================================
+
+	fmt.Printf("✅ 处理新推送 → Alert: %s | Tx: %s\n", webhook.AlertName, webhook.Transfer.TransactionHash)
+
 	// 控制台打印关键信息（方便调试）
 	fmt.Printf("\n=== Arkham Webhook 收到新数据 ===\n")
 	fmt.Printf("警报名称:	%s\n", webhook.AlertName)
@@ -102,7 +139,7 @@ func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("链: %s | 区块: %d\n", webhook.Transfer.Chain, webhook.Transfer.BlockNumber)
 
 	fmt.Printf("交易时间: %s\n", getTime(webhook.Transfer.BlockTimestamp))
-	fmt.Println("✅ 准备推送钉钉测试啊...")
+	// fmt.Println("✅ 准备推送钉钉测试啊...")
 	// 发送到钉钉
 	sendToDingTalk(webhook)
 
@@ -139,6 +176,7 @@ func sendToDingTalk(webhook ArkhamWebhook) {
 - 时间：%s
 
 **💸 资产转移**
+- 交易哈希：%s
 - From：%s 
 - To：%s 
 
@@ -150,7 +188,7 @@ func sendToDingTalk(webhook ArkhamWebhook) {
 		webhook.AlertName,
 		webhook.Transfer.Chain,
 		getTime(webhook.Transfer.BlockTimestamp),
-		// webhook.Transfer.TransactionHash,
+		webhook.Transfer.TransactionHash,
 		// webhook.Transfer.BlockNumber,
 		webhook.Transfer.FromAddress.Address,
 		// webhook.Transfer.FromAddress.ArkhamEntity.Name,
@@ -197,28 +235,66 @@ func sendToDingTalk(webhook ArkhamWebhook) {
 }
 
 // 改为 本地时间区
-func getTime(strings string) string {
-
-	// 原始 RFC3339 时间字符串
-	// rfcTime := string
-	fmt.Println(strings, "11111111111")
-
-	// 解析成 time.Time 对象
-	parsedTime, err := time.Parse(time.RFC3339, strings)
-	if err != nil {
-		panic(err)
+func getTime(timeStr string) string {
+	if timeStr == "" {
+		return "时间解析失败"
 	}
 
-	// 格式化成常见的中文习惯格式（例如：2023-08-23 22:26:35）
-	normalTime := parsedTime.Format("2006-01-02 15:04:05")
-	fmt.Println(normalTime)
+	fmt.Println("原始时间:", timeStr)
 
-	// 也可以带时区显示（本地时区）
-	localTime := parsedTime.Local().Format("2006-01-02 15:04:05")
-	fmt.Println(localTime)
+	// 1. 解析 RFC3339 时间（Arkham 返回的是 UTC）
+	parsedTime, err := time.Parse(time.RFC3339, timeStr)
+	if err != nil {
+		fmt.Println("时间解析失败:", err)
+		return timeStr // 解析失败时返回原始字符串
+	}
 
-	return localTime
+	// 2. 加载中国上海时区（东八区）
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		fmt.Println("加载时区失败:", err)
+		return parsedTime.Format("2006-01-02 15:04:05")
+	}
+
+	// 3. 转换为中国时间
+	chinaTime := parsedTime.In(loc)
+
+	// 4. 格式化输出（你想要的格式）
+	formatted := chinaTime.Format("2006-01-02 15:04:05")
+
+	fmt.Println("北京时间:", formatted)
+	return formatted
 }
+
+// func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
+// if r.Method != http.MethodPost {
+//     http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+//     return
+// }
+
+// var webhook ArkhamWebhook
+// if err := json.NewDecoder(r.Body).Decode(&webhook); err != nil {
+//     http.Error(w, "解析失败", http.StatusBadRequest)
+//     return
+// }
+
+// // ==================== 去重核心逻辑 ====================
+// key := fmt.Sprintf("%d-%s", webhook.ID, webhook.Transfer.TransactionHash)
+// if isProcessed(key) {
+// 	fmt.Printf("⚠️ 重复请求，已忽略: %s\n", key)
+// 	w.WriteHeader(http.StatusOK)
+// 	return
+// }
+// markProcessed(key)
+// // ====================================================
+
+// fmt.Printf("✅ 处理新推送 → Alert: %s | Tx: %s\n", webhook.AlertName, webhook.Transfer.TransactionHash)
+
+// sendToDingTalk(webhook)
+
+// w.WriteHeader(http.StatusOK)
+// json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+// }
 
 func main() {
 	mux := http.NewServeMux()
