@@ -116,6 +116,7 @@ func arkhamWebhookHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ==================== 去重核心逻辑 ====================
+	fmt.Printf("✅ 预处理新推送KEY → %d-%s\n", webhook.ID, webhook.Transfer.TransactionHash)
 	key := fmt.Sprintf("%d-%s", webhook.ID, webhook.Transfer.TransactionHash)
 	if isProcessed(key) {
 		fmt.Printf("⚠️ 重复请求，已忽略: %s\n", key)
